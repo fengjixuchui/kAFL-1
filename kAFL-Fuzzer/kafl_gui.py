@@ -167,32 +167,32 @@ def ptime(secs):
 class GuiDrawer:
     def __init__(self, workdir, stdscr):
         self.gui_mutex = Lock()
+        self.workdir = workdir
+        self.finished = False
+        self.current_slave_id = 0
+        self.stdscr = stdscr
+
+        # Fenster und Hintergrundfarben
         curses.start_color()
         curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLACK)
         curses.init_pair(2, curses.COLOR_GREEN, curses.COLOR_BLACK)
         curses.init_pair(3, curses.COLOR_YELLOW, curses.COLOR_BLACK)
         curses.init_pair(4, curses.COLOR_RED, curses.COLOR_BLACK)
         default_col = curses.color_pair(1)
+        self.stdscr.bkgd(default_col)
+        self.stdscr.nodelay(True)
 
-        # Fenster und Hintergrundfarben
-        stdscr.bkgd(default_col)
         self.gui = Interface(stdscr)
-        self.stdscr = stdscr
-        self.current_slave_id = 0
-
-        self.finished = False
         self.data = GuiData(workdir)
+
         self.watcher = Thread(target=self.watch, args=(workdir,))
-        self.cpu_watcher = Thread(target=self.watch_cpu, args=())
-        self.loop = Thread(target=self.loop, args=())
         self.watcher.daemon = True
         self.watcher.start()
+
+        self.cpu_watcher = Thread(target=self.watch_cpu, args=())
         self.cpu_watcher.daemon = True
         self.cpu_watcher.start()
 
-        stdscr.refresh()
-        self.loop.start()
-        self.loop.join()
 
     def draw(self):
         d = self.data
@@ -268,7 +268,7 @@ class GuiDrawer:
             if i == self.current_slave_id:
                 hl = ">"
             nid = d.slave_input_id(i)
-            if nid not in [None, 0]:
+            if nid not in [None, 0] and d.nodes.get(nid, None):
                 self.gui.print_info_line([(15, "", d.slave_stage(i)),
                                           (10, "node", "%d" % d.slave_input_id(i)),
                                           (14,  "fav/lvl",  "%d/%d" % (d.node_fav_bits(nid),
@@ -287,7 +287,7 @@ class GuiDrawer:
         self.gui.print_title_line("Payload Info")
         self.gui.print_sep_line()
         nid = d.slave_input_id(i)
-        if nid not in [None, 0]:
+        if nid not in [None, 0] and d.nodes.get(nid, None):
             self.gui.print_info_line([
                 (10, "Parent", "%8d" % d.node_parent_id(nid)),
                 (10, "Size",   pbyte(d.node_size(nid)) + "B"),
@@ -310,23 +310,40 @@ class GuiDrawer:
         self.gui.refresh()
 
     def loop(self):
-        d = self.data
+        self.gui.refresh()
         while True:
+            redraw = False
             char = self.stdscr.getch()
+            if char == curses.KEY_UP:
+                self.current_slave_id = (self.current_slave_id - 1) % self.data.num_slaves()
+                redraw = True
+            elif char == curses.KEY_DOWN:
+                self.current_slave_id = (self.current_slave_id + 1) % self.data.num_slaves()
+                redraw = True
+            elif char == ord("q") or char == ord("Q"):
+                self.finished = True
+                return
+
+            if not redraw and not self.data.redraw:
+                time.sleep(0.05)
+                continue
+
             self.gui_mutex.acquire()
-            theme = 0
             try:
-                if char == curses.KEY_UP:
-                    self.current_slave_id = (self.current_slave_id - 1) % d.num_slaves()
-                elif char == curses.KEY_DOWN:
-                    self.current_slave_id = (self.current_slave_id + 1) % d.num_slaves()
-                elif char == ord("q") or char == ord("Q"):
-                    self.finished = True
-                    return
-                self.draw()
+                    self.draw()
+            except:
+                self.gui.clear()
+                min_rows = 42
+                min_cols = 82
+                rows, cols = self.stdscr.getmaxyx()
+                if rows < min_rows or cols < min_cols:
+                    print("Terminal too small? (found: %dx%d)" % (rows, cols));
+                    self.gui.refresh()
+                else:
+                    raise
             finally:
+                self.data.redraw = False
                 self.gui_mutex.release()
-                time.sleep(0.1)
 
     def watch(self, workdir):
         d = self.data
@@ -343,7 +360,7 @@ class GuiDrawer:
             try:
                 (_, type_names, path, filename) = event
                 d.update(path, filename)
-                self.draw()
+                d.redraw = True
             finally:
                 self.gui_mutex.release()
 
@@ -359,7 +376,7 @@ class GuiDrawer:
                 self.data.mem = mem_info
                 self.data.cpu = cpu_info
                 self.data.swap = swap_info
-                self.draw()
+                self.data.redraw = True
             finally:
                 self.gui_mutex.release()
 
@@ -371,6 +388,7 @@ class GuiData:
         self.execs_avg = 0
         self.slave_stats = list()
         self.load_initial()
+        self.redraw = True
 
     def load_initial(self):
         print("Waiting for slaves to launch..")
@@ -428,9 +446,6 @@ class GuiData:
     def runtime(self):
         return max([x["run_time"] for x in self.slave_stats])
 
-    def execs_p_sec(self):
-        return sum([x["execs/sec"] for x in self.slave_stats])
-
     def execs_p_sec_avg(self):
         return self.total_execs()/self.runtime()
 
@@ -438,7 +453,7 @@ class GuiData:
         return self.slave_stats[i].get(["execs/sec"],0)
 
     def total_execs(self):
-        return sum([x["total_execs"] for x in self.slave_stats])
+        return self.stats.get("total_execs", 0)
 
     def num_slaves(self):
         return len(self.slave_stats)
@@ -459,17 +474,15 @@ class GuiData:
 
     def stability(self):
         # chance p() to survive 100 executions: ((total-crashes)/total)^100
-        if self.total_execs() == 0:
-            return 0
         n = self.total_execs()
-        c = self.total_reloads()
-        return 100*((n-c)/n)**100
+        if n == 0:
+            return 0
+        else:
+            c = self.total_reloads()
+            return 100*((n-c)/n)**100
 
     def total_reloads(self):
-        total_reloads = 0
-        for slave_info in self.slave_stats:
-            total_reloads += slave_info["num_reload"]
-        return total_reloads
+        return self.stats.get("num_reload", 0)
 
     def reload_p_sec(self):
         return self.total_reloads()/self.runtime()
@@ -678,13 +691,15 @@ class GuiData:
 
 
 def main(stdscr):
-    GuiDrawer(sys.argv[1], stdscr)
+    gui = GuiDrawer(sys.argv[1], stdscr)
+    gui.loop()
+
 
 import locale
 locale.setlocale(locale.LC_ALL, '')
 code = locale.getpreferredencoding()
 
-if len(sys.argv) == 2:
-    curses.wrapper(main)
-else:
+if len(sys.argv) < 2 or not os.path.exists(sys.argv[1]):
     print("Usage: " + sys.argv[0] + " <kafl-workdir>")
+else:
+    curses.wrapper(main)

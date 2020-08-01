@@ -15,8 +15,9 @@ from common.util import print_fail, is_float, is_int, Singleton
 import six
 
 default_section = "Fuzzer"
-default_config = {"PAYLOAD_SHM_SIZE": (65 << 10),
-                  "BITMAP_SHM_SIZE": (64 << 10),
+default_config = {"PAYLOAD_SHM_SIZE": 131072,
+                  "BITMAP_SHM_SIZE": 65536,
+                  "AGENT_MAX_SIZE": 134217728,
                   "QEMU_KAFL_LOCATION": "",
                   "RADAMSA_LOCATION": "radamsa/bin/radamsa",
                   "TIMEOUT_TICK_FACTOR": 10.0,
@@ -107,6 +108,10 @@ def add_args_fuzzer(parser):
                         type=parse_is_dir, help='path to the seed directory.')
     parser.add_argument('-dict', required=False, metavar='<file>', type=parse_is_file,
                         help='import dictionary file for use in havoc stage.', default=None)
+    parser.add_argument('-trace', required=False, help='store new traces while fuzzing.',
+                        action='store_true', default=False)
+    parser.add_argument('-funky', required=False, help='perform extra validation and store funky inputs.',
+                        action='store_true', default=False)
     parser.add_argument('-D', required=False, help='skip deterministic stage (dumb mode).',
                         action='store_false', default=True)
     parser.add_argument('-d', required=False, help='disable effector maps during deterministic stage.',
@@ -342,8 +347,10 @@ class DebugConfiguration(six.with_metaclass(Singleton)):
 
         general.add_argument('-input', metavar='<file/dir>', action=FullPath, type=str,
                             help='path to input file or workdir.')
-        general.add_argument('-n', metavar='<num>', help='debug iterations (default: 5)',
+        general.add_argument('-n', metavar='<num>', help='execute <num> times (for some actions)',
                             default=5, type=int)
+        parser.add_argument('-trace', required=False, help='capture full PT traces (for some actions)',
+                        action='store_true', default=False)
         general.add_argument('-action', required=False, metavar='<cmd>', choices=debug_modes, 
                             help=debug_modes_help)
 

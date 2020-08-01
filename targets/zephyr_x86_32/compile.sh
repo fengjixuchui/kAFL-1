@@ -14,8 +14,15 @@ SDK_URL="https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v0.11.3/
 
 KAFL_OPTS="-p $(nproc) -grimoire -redqueen -hammer_jmp_tables -catch_reset"
 
+function fail {
+	echo
+	echo -e "$1"
+	echo
+	exit
+}
+
 function fetch_zephyr() {
-	echo -e "\nInstalling Zephyr to $KAFL_ROOT/zephyrproject.\n\tHit Enter to install or ctrl-c to abort."
+	echo -e "\nInstalling Zephyr to $KAFL_ROOT/zephyrproject.\n\n\tHit Enter to install or ctrl-c to abort."
 	read
 	echo "[-] Fetching dependencies.."
 	# https://docs.zephyrproject.org/latest/getting_started/installation_linux.html
@@ -31,7 +38,7 @@ function fetch_zephyr() {
 
 	# use west to fetch Zephyr
 	pip3 install --user west
-	which west || ( echo "Error: ~/.local/bin not in \$PATH?"; exit )
+	which west || fail "Error: ~/.local/bin not in \$PATH?"
 
 	echo "[-] Fetching Zephyr components.."
 	pushd $KAFL_ROOT
@@ -47,6 +54,9 @@ function fetch_sdk() {
 	# Download Zephyr SDK. Not pretty.
 	pushd $KAFL_ROOT
 	INSTALLER=$(basename $SDK_URL)
+
+	echo -e "\nAttempting to fetch and execute Zephyr SDK installer from\n$SDK_URL\n\n\tHit Enter to continue or ctrl-c to abort."
+	read
 	wget -c -O $INSTALLER $SDK_URL
 	bash $INSTALLER
 }
@@ -54,13 +64,13 @@ function fetch_sdk() {
 function check_sdk() {
 
 	# fetch Zephyr and SDK if not available
-	test -d "$TARGET_ROOT/zephyrproject" || fetch_zephyr
-	test -f "$HOME/.zephyrrc" || fetch_sdk
+	test -d "$KAFL_ROOT/zephyrproject" || (echo "Could not find Zephyr."; fetch_zephyr)
+	test -f "$HOME/.zephyrrc" || (echo "Could not find a Zephyr SDK."; fetch_sdk)
 
 	# check again and this time bail out on error
-	test -d "$TARGET_ROOT/zephyrproject" || (echo "Could not find Zephyr install. Exit."; exit)
-	test -f "$HOME/.zephyrrc" || (echo "Could not find Zephyr SDK. Exit."; exit)
-	source "$TARGET_ROOT/zephyrproject/zephyr/zephyr-env.sh"
+	test -d "$KAFL_ROOT/zephyrproject" || fail "Could not find Zephyr install. Exit."
+	test -f "$HOME/.zephyrrc" || fail "Could not find Zephyr SDK. Exit."
+	source "$KAFL_ROOT/zephyrproject/zephyr/zephyr-env.sh"
 
 	echo "Using Zephyr build settings:"
 	echo " ZEPHYR_BASE=$ZEPHYR_BASE"
@@ -82,7 +92,7 @@ function build_app() {
 
 	pushd $TARGET_ROOT
 	test -d build && rm -rf build
-   	mkdir build || exit
+   	mkdir build || fail "Could not create build/ directory. Exit."
 	cd build
 	cmake -GNinja -DBOARD=qemu_x86 -DKAFL_${APP}=y ..
 	ninja
@@ -94,7 +104,7 @@ function run() {
 
 	BIN=${TARGET_ROOT}/build/zephyr/zephyr.elf
 	MAP=${TARGET_ROOT}/build/zephyr/zephyr.map
-	test -f $BIN -a -f $MAP || exit
+	test -f $BIN -a -f $MAP || fail "Could not find Zephyr target .elf and .map files. Need to build first?"
 
 	range=$(grep -A 1 ^text "$MAP" |xargs |cut -d\  -f 2,3)
 	ip_start=$(echo $range|sed 's/ .*//')
@@ -119,7 +129,7 @@ function cov()
 
 	BIN=${TARGET_ROOT}/build/zephyr/zephyr.elf
 	MAP=${TARGET_ROOT}/build/zephyr/zephyr.map
-	test -f $BIN -a -f $MAP || exit
+	test -f $BIN -a -f $MAP || fail "Could not find Zephyr target .elf and .map files. Need to build first?"
 
 	range=$(grep -A 1 ^text "$MAP" |xargs |cut -d\  -f 2,3)
 	ip_start=$(echo $range|sed 's/ .*//')
@@ -139,6 +149,38 @@ function cov()
 		-mem 32 \
 		-work_dir $TEMPDIR \
 		-input $WORKDIR
+	popd
+}
+
+function noise()
+{
+	pushd $KAFL_ROOT
+	TEMPDIR=$(mktemp -d -p /dev/shm)
+	PAYLOAD=$1
+
+	BIN=${TARGET_ROOT}/build/zephyr/zephyr.elf
+	MAP=${TARGET_ROOT}/build/zephyr/zephyr.map
+	test -f $BIN -a -f $MAP || fail "Could not find Zephyr target .elf and .map files. Need to build first?"
+
+	range=$(grep -A 1 ^text "$MAP" |xargs |cut -d\  -f 2,3)
+	ip_start=$(echo $range|sed 's/ .*//')
+	ip_end=$(echo -e "obase=16\nibase=16\n$(echo $range|sed s/x//g|sed 's/\ /+/'|tr a-z A-Z)"|bc)
+
+	echo
+	echo "Using temp workdir >>$TEMPDIR<<.."
+	echo "IP filter range: $ip_start-0x$ip_end"
+	echo
+	sleep 1
+
+
+	# Note: -ip0 and other VM settings should match those used during fuzzing
+	python3 kAFL-Fuzzer/kafl_debug.py -action noise \
+		-v -ip0 ${ip_start}-0x${ip_end} \
+		-kernel ${BIN} \
+		-mem 32 \
+		-n 0 \
+		-work_dir $TEMPDIR \
+		-input $PAYLOAD
 	popd
 }
 
@@ -170,6 +212,10 @@ case $CMD in
 	"cov")
 		test -d "$1" || usage
 		cov $1
+		;;
+	"noise")
+		test -f "$1" || usage
+		noise "$1"
 		;;
 	"build")
 		test -n "$1" || usage
